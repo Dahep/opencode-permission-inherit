@@ -266,3 +266,39 @@ reply fails harmlessly server-side.
 **How do I see what it's doing?** Set `log: "/tmp/permission-inherit.log"`.
 Every line is `timestamp <path>-<approved(...)|rejected> <type> <patterns>
 for <session> [<reason>]`.
+
+## Trust model and release flow
+
+Releases are the trust anchor. Tags are meant for scripts that install this
+plugin, and each release ships a `SHA256SUMS` asset. Consumers who install
+automatically should pin a tag and verify the hash before placing the file in
+a plugins directory; the hash line in the consuming repo's diff is then the
+only thing a reviewer has to trust.
+
+Example (the pins below live in the installer script, not the plugin repo):
+
+```sh
+wanted="v0.1.0"
+hash="48756392a405094817dc15ef881bc57dd055649cba177077ede824344984138d"
+curl -fsSL "https://raw.githubusercontent.com/Dahep/opencode-permission-inherit/$wanted/permission-inherit.ts" -o "$tmp"
+printf '%s  %s\n' "$hash" "$tmp" | sha256sum --check --strict --quiet || { echo "abort: hash mismatch"; exit 1; }
+```
+
+Why pin instead of tracking `main`: the file is executed inside opencode's
+plugin context and can auto-approve permission asks, so "whatever main
+contains right now" is a standing offer to future account compromise.
+Tracking `main` means an attacker who takes over the repo gets the next
+install. Pinning means they get nothing until you actively re-pin.
+
+Making a release:
+
+```sh
+sha256sum permission-inherit.ts > SHA256SUMS
+git commit -am "checksums" && git push
+git tag vX.Y.Z && git push origin vX.Y.Z
+gh release create vX.Y.Z permission-inherit.ts SHA256SUMS
+```
+
+Upgrading a pinned installer is a two-line edit (tag + hash) in one commit;
+the diff is the review unit. Untagged commits on `main` are unreleased: a
+new `main` push alone changes nothing for anyone pinning.
