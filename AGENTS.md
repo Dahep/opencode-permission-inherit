@@ -15,7 +15,12 @@ node --experimental-strip-types test-smoke.mts
 # tsc is intentionally configured (tsconfig.json, noEmit, strict) against that assumption.
 
 # Release (see README "Trust model and release flow"):
-sha256sum permission-inherit.ts > SHA256SUMS
+scripts/release.sh check --tag vX.Y.Z      # preflight
+scripts/release.sh create --tag vX.Y.Z --dry-run
+scripts/release.sh create --tag vX.Y.Z     # --yes to skip confirmation
+
+# Install from a pinned release (consumer side):
+scripts/install.sh --tag v0.1.0 --hash <sha256-of-permission-inherit.ts> [--dir X] [--force]
 ```
 
 There are no lint/format/typecheck commands that run clean in this repo as-is; verify behavior with the smoke test above.
