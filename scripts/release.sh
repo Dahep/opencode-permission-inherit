@@ -73,6 +73,10 @@ die() { printf 'Error: %s\n' "$1" >&2; shift; [ $# -gt 0 ] && printf '  %s\n' "$
 
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool '$1' not found in PATH"; }
 
+hash_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+hash_of_tag_file() { git show "$1:$PLUGIN_FILE" | sha256sum | cut -d' ' -f1; }
+
 # --- flag parsing -----------------------------------------------------------
 
 cmd=""
@@ -145,10 +149,12 @@ check_remote_current() {
 }
 
 check_checksums() {
-  local actual
-  actual="$(sha256sum "$PLUGIN_FILE")"
-  if ! printf '%s\n' "$actual" | sha256sum --check --strict "$SUMS_FILE" >/dev/null 2>&1; then
+  local expected
+  expected="$(cut -d' ' -f1 "$SUMS_FILE" | head -1)"
+  if ! [ "$expected" = "$(hash_of "$PLUGIN_FILE")" ]; then
     die "$SUMS_FILE does not match the current $PLUGIN_FILE." \
+      "  $SUMS_FILE: $expected" \
+      "  $PLUGIN_FILE: $(hash_of "$PLUGIN_FILE")" \
       "  Regenerate in a normal commit first:" \
       "    sha256sum $PLUGIN_FILE > $SUMS_FILE && git commit -am 'checksums' && git push" \
       "  ...then re-run: $PROG $cmd${tag:+ --tag $tag}"
@@ -180,7 +186,7 @@ verify_released() {
   printf 'downloaded %s (%s)\n' "$tag" "$PLUGIN_FILE"
 
   sums_entry="$(cut -d' ' -f1 "$tmpdir/$SUMS_FILE" | head -1)"
-  local asset_hash; asset_hash="$(sha256sum "$tmpdir/$PLUGIN_FILE" | cut -d' ' -f1)"
+  local asset_hash; asset_hash="$(hash_of "$tmpdir/$PLUGIN_FILE")"
 
   if [ "$asset_hash" != "$sums_entry" ]; then
     rm -rf "$tmpdir"
@@ -188,18 +194,26 @@ verify_released() {
         "  The release assets are inconsistent — investigate before installing."
   fi
 
-  tagged_hash="$(git show "$tag:$PLUGIN_FILE" 2>/dev/null | sha256sum | cut -d' ' -f1)" || true
-
-  if [ -n "$tagged_hash" ] && [ "$tagged_hash" != "$sums_entry" ]; then
-    rm -rf "$tmpdir"
-    die "tagged $PLUGIN_FILE hash ($tagged_hash) != release SHA256SUMS ($sums_entry)." \
-      "  The tag content and the release assets diverged. Do not install this release."
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+    local tagged_hash; tagged_hash="$(hash_of_tag_file "$tag")"
+    if [ "$tagged_hash" != "$sums_entry" ]; then
+      rm -rf "$tmpdir"
+      die "tagged $PLUGIN_FILE hash ($tagged_hash) != release SHA256SUMS ($sums_entry)." \
+        "  The tag content and the release assets diverged. Do not install this release."
+    fi
+  else
+    echo "note: tag $tag not present locally; asset-vs-SUMS verified, tag blob skipped"
   fi
   rm -rf "$tmpdir"
   echo "ok: $tag $sums_entry"
 }
 
 # --- create -----------------------------------------------------------------
+
+print_release_summary() {
+  echo "  sha256: $1"
+  echo "  url: https://github.com/$REPO/releases/tag/$tag"
+}
 
 do_create() {
   need_git_repo
@@ -210,8 +224,8 @@ do_create() {
 
   local sums_hash; sums_hash="$(cut -d' ' -f1 "$SUMS_FILE" | head -1)"
 
-  # Resume support: a previous run may have died after pushing the tag or
-  # creating the release. Each phase is skipped if already done.
+  # Detect release state. A previous run may have died after pushing the tag
+  # or creating the release; each phase below no-ops when already done.
   local have_tag=0 have_release=0
   if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1 \
      || [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
@@ -221,49 +235,41 @@ do_create() {
     have_release=1
   fi
 
+  if [ "$have_release" = "1" ] && [ "$have_tag" = "0" ]; then
+    die "release $tag exists but tag $tag doesn't — inconsistent state." \
+        "  Delete the orphaned release: gh release delete $tag -R $REPO --cleanup-tag"
+  fi
+
   if [ "$have_tag" = "1" ]; then
-    # Never re-point; confirm the existing tag's content matches the checksums.
+    # Never re-point; the existing tag's content must match the checksums.
     if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
       git fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" \
         || die "tag $tag exists on origin but could not be fetched."
     fi
-    local tagged_hash; tagged_hash="$(git show "$tag:$PLUGIN_FILE" | sha256sum | cut -d' ' -f1)"
+    local tagged_hash; tagged_hash="$(hash_of_tag_file "$tag")"
     if [ "$tagged_hash" != "$sums_hash" ]; then
       die "tag $tag already exists but its $PLUGIN_FILE hash ($tagged_hash)" \
           "differs from the working SHA256SUMS ($sums_hash)." \
           "  Tags are immutable — pick the next version."
     fi
+    if [ "$have_release" = "1" ]; then
+      echo "release $tag already exists — running post-flight verify only"
+      verify_released
+      echo "  already released: $tag"
+      print_release_summary "$sums_hash"
+      return 0
+    fi
     echo "resume: tag $tag already exists with matching content"
   fi
 
-  if [ "$have_release" = "1" ] && [ "$have_tag" = "1" ]; then
-    echo "release $tag already exists — running post-flight verify only"
-    verify_released
-    echo "already released: $tag"
-    echo "url: https://github.com/$REPO/releases/tag/$tag"
-    echo "sha256: $sums_hash"
-    return 0
-  fi
-
   local last_tag; last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo '(none)')"
-
   echo "release plan:"
   echo "  tag:     $tag  (previous: $last_tag)"
   echo "  file:    $PLUGIN_FILE  sha256: $sums_hash"
-  if [ "$have_tag" = "1" ]; then
-    echo "  steps:   skip tag (exists) → gh release create (assets: $PLUGIN_FILE, $SUMS_FILE) → verify"
-    echo "  (resuming an interrupted release)"
-  elif [ "$have_release" = "1" ]; then
-    die "release $tag exists but tag $tag doesn't — inconsistent state." \
-        "  Delete the orphaned release: gh release delete $tag -R $REPO --cleanup-tag"
-  else
-    echo "  steps:   push main → create tag $tag → push tag → gh release create (assets: $PLUGIN_FILE, $SUMS_FILE) → verify"
-  fi
+  echo "  steps:   push main → tag → push tag → gh release create (assets: $PLUGIN_FILE, $SUMS_FILE) → verify"
+  [ "$have_tag" = "0" ] || echo "  (resuming: tag phase skipped)"
 
-  if [ "$dry_run" = "1" ]; then
-    echo "dry-run: no changes made."
-    exit 0
-  fi
+  [ "$dry_run" = "1" ] && { echo "dry-run: no changes made."; exit 0; }
 
   if [ "$assume_yes" != "1" ]; then
     printf 'create release %s? [y/N] ' "$tag"
@@ -287,8 +293,7 @@ do_create() {
   verify_released
 
   echo "released $tag"
-  echo "url: https://github.com/$REPO/releases/tag/$tag"
-  echo "sha256: $sums_hash"
+  print_release_summary "$sums_hash"
 }
 
 # --- check ------------------------------------------------------------------

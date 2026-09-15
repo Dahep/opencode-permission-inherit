@@ -64,6 +64,8 @@ die() { printf 'Error: %s\n' "$1" >&2; shift; [ $# -gt 0 ] && printf '  %s\n' "$
 
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool '$1' not found in PATH"; }
 
+hash_of() { sha256sum "$1" | cut -d' ' -f1; }
+
 tag=""
 hash=""
 dir=""
@@ -127,26 +129,25 @@ else
   printf 'warning: release has no %s asset; relying on the pinned hash only.\n' "$SUMS_FILE" >&2
 fi
 
-actual="$(sha256sum "$tmp/$PLUGIN_FILE" | cut -d' ' -f1)"
+actual="$(hash_of "$tmp/$PLUGIN_FILE")"
 if [ "$actual" != "$hash" ]; then
-  printf 'Error: sha256 mismatch for %s.\n' "$tag" >&2
-  printf '  pinned:  %s\n  actual:  %s\n' "$hash" "$actual" >&2
-  printf '  Nothing was installed. Do not update the pin to match unless you\n' >&2
-  printf '  have verified the new release out of band.\n' >&2
-  exit 1
+  die "sha256 mismatch for $tag." \
+    "  pinned:  $hash" \
+    "  actual:  $actual" \
+    "  Nothing was installed. Do not update the pin to match unless you" \
+    "  have verified the new release out of band."
 fi
 
 if [ -e "$dir/$PLUGIN_FILE" ] && [ "$force" != "1" ]; then
-  existing="$(sha256sum "$dir/$PLUGIN_FILE" | cut -d' ' -f1)"
+  existing="$(hash_of "$dir/$PLUGIN_FILE")"
   if [ "$existing" = "$hash" ]; then
     echo "already installed: $dir/$PLUGIN_FILE ($hash)"
-  else
-    echo "already installed with different content: $dir/$PLUGIN_FILE" >&2
-    printf '  pinned: %s\n  on disk: %s\n' "$hash" "$existing" >&2
-    printf '  Re-run with --force to overwrite, or inspect the file first.\n' >&2
-    exit 1
+    exit 0
   fi
-  exit 0
+  die "already installed with different content: $dir/$PLUGIN_FILE" \
+    "  pinned: $hash" \
+    "  on disk: $existing" \
+    "  Re-run with --force to overwrite, or inspect the file first."
 fi
 
 mkdir -p "$dir"
