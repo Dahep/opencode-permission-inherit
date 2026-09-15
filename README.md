@@ -290,14 +290,30 @@ contains right now" is a standing offer to future account compromise.
 Tracking `main` means an attacker who takes over the repo gets the next
 install. Pinning means they get nothing until you actively re-pin.
 
-Making a release:
+Making a release (maintainer side — `scripts/release.sh`):
 
 ```sh
-sha256sum permission-inherit.ts > SHA256SUMS
-git commit -am "checksums" && git push
-git tag vX.Y.Z && git push origin vX.Y.Z
-gh release create vX.Y.Z permission-inherit.ts SHA256SUMS
+scripts/release.sh check --tag vX.Y.Z        # preflight, never mutates
+scripts/release.sh create --tag vX.Y.Z --dry-run
+scripts/release.sh create --tag vX.Y.Z       # or add --yes to skip confirmation
 ```
+
+`create` runs every preflight (clean tree, on `main`, in sync with origin,
+checksums match, tag free), tags, pushes, creates the GitHub release with
+`permission-inherit.ts` and `SHA256SUMS` as assets, then re-downloads the
+assets and verifies them against the tagged file. It is idempotent: re-running
+after a partial failure skips the steps already done.
+
+Consumers install with `scripts/install.sh`, which enforces the pin:
+
+```sh
+scripts/install.sh --tag v0.1.0 \
+  --hash 48756392a405094817dc15ef881bc57dd055649cba177077ede824344984138d \
+  [--dir ./.opencode/plugins] [--force]
+```
+
+The installer downloads only from a pinned release, fails closed on hash
+mismatch, and no-ops if the pinned version is already installed.
 
 Upgrading a pinned installer is a two-line edit (tag + hash) in one commit;
 the diff is the review unit. Untagged commits on `main` are unreleased: a
